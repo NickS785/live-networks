@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# --- env/ folder ---
+# Track the folder and blank templates, ignore real credentials and config
+env/*
+!env/dot.env
+!env/gcs_service_account.json
+
+# Model artifacts (large files)
+*.pth
+*.pt
+*.ckpt
+model_data/
+results/

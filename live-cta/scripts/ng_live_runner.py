@@ -27,11 +27,18 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+# Load environment variables from dotenv BEFORE any config reads
+from dotenv import load_dotenv
+
+_env_file = os.getenv("DOTENV_PATH", str(Path(__file__).resolve().parent.parent / "env" / "dot.env"))
+load_dotenv(_env_file, override=False)
 
 import pandas as pd
 import torch
@@ -317,6 +324,18 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # Auto-detect model checkpoint from results/ if not specified
+    if not args.checkpoint:
+        results_dir = Path(os.getenv("RESULTS_DIR", "results/"))
+        candidates = sorted(results_dir.glob("*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+        candidates += sorted(results_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            args.checkpoint = str(candidates[0])
+            logger.info("Auto-detected model checkpoint: %s", args.checkpoint)
+        else:
+            logger.error("--checkpoint not specified and no .pth/.pt files found in %s", results_dir)
+            sys.exit(1)
+
     logger.info("Starting NG Live Runner")
     logger.info("  Checkpoint: %s", args.checkpoint)
     logger.info("  Model type: %s", args.model_type)
@@ -404,8 +423,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="NG Live Trading Runner with IBKR Web API",
     )
-    # Model
-    parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint (.pth)")
+    # Model — default searches results/ directory
+    _results_dir = os.getenv("RESULTS_DIR", "results/")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Path to model checkpoint (.pth). Default: auto-detect from results/")
     parser.add_argument(
         "--model-type",
         choices=["hybrid", "moe"],
@@ -416,11 +437,13 @@ def parse_args() -> argparse.Namespace:
     # IBKR connection
     parser.add_argument(
         "--gateway-url",
-        default="https://localhost:5000",
+        default=os.getenv("IBKR_BASE_URL", "https://localhost:5000"),
         help="IBKR Client Portal Gateway URL",
     )
-    parser.add_argument("--conid", required=True, help="IBKR contract ID for NG futures")
-    parser.add_argument("--account", required=True, help="IBKR account ID")
+    parser.add_argument("--conid", default=os.getenv("NG_CONID", ""),
+                        help="IBKR contract ID for NG futures")
+    parser.add_argument("--account", default=os.getenv("IBKR_ACCOUNT_ID", ""),
+                        help="IBKR account ID")
     parser.add_argument(
         "--no-verify-ssl",
         action="store_true",
@@ -431,9 +454,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-contracts", type=int, default=1, help="Max position size")
     parser.add_argument("--dry-run", action="store_true", help="Log signals without placing orders")
 
-    # Daily data paths
-    parser.add_argument("--eia-path", default=None, help="Path to EIA storage cache file")
-    parser.add_argument("--weather-path", default=None, help="Path to weather (HDD/CDD) cache file")
+    # Daily data paths — defaults use model_data/ prefix
+    _model_data = os.getenv("MODEL_DATA_DIR", "model_data/")
+    parser.add_argument("--eia-path",
+                        default=os.getenv("EIA_CACHE_DIR", _model_data) + "ng_eia_cache.hdf",
+                        help="Path to EIA storage cache file")
+    parser.add_argument("--weather-path",
+                        default=os.getenv("WEATHER_CACHE_DIR", _model_data) + "new_weather.hdf",
+                        help="Path to weather (HDD/CDD) cache file")
     parser.add_argument(
         "--daily-features-path",
         default=None,

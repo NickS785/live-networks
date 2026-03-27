@@ -40,6 +40,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# Load environment variables from dotenv BEFORE any config reads
+from dotenv import load_dotenv
+
+_env_file = os.getenv("DOTENV_PATH", str(Path(__file__).resolve().parent.parent / "env" / "dot.env"))
+load_dotenv(_env_file, override=False)
+
 import numpy as np
 import pandas as pd
 import torch
@@ -60,6 +66,15 @@ logger = logging.getLogger("ng_inference")
 
 TZ = "America/Chicago"
 CACHE_DIR = Path(os.getenv("CTAFLOW_CACHE_DIR", Path.home() / ".ctaflow" / "live_context"))
+
+# GCS / path defaults from env
+_GCS_BUCKET = os.getenv("GCS_BUCKET", "ctaflow-prod-artifacts")
+_GCS_PROJECT = os.getenv("GCS_PROJECT", "")
+_GCS_REGION = os.getenv("GCS_REGION", "us-central1")
+_GCS_CREDS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+_MODEL_DATA_DIR = os.getenv("MODEL_DATA_DIR", "model_data/")
+_INTRADAY_CSV = os.getenv("INTRADAY_CSV", "model_data/NG/intraday_2.csv")
+_RESULTS_DIR = os.getenv("RESULTS_DIR", "results/")
 _running = True
 
 
@@ -313,17 +328,19 @@ def main():
     parser.add_argument("--conid", required=True, help="IBKR contract ID for NG front month")
 
     # Cloud context (EIA, weather, features, spline transformer)
-    parser.add_argument("--context-backend", choices=["s3", "gcs", "local"], default="local",
-                        help="Where to pull daily context files from")
-    parser.add_argument("--context-bucket", default=os.getenv("CONTEXT_BUCKET", "ctaflow-prod"))
+    parser.add_argument("--context-backend", choices=["s3", "gcs", "local"], default="gcs",
+                        help="Where to pull daily context files from (default: gcs)")
+    parser.add_argument("--context-bucket", default=_GCS_BUCKET)
     parser.add_argument("--s3-endpoint", default=os.getenv("S3_ENDPOINT", ""))
     parser.add_argument("--s3-prefix", default=os.getenv("S3_PREFIX", ""))
-    parser.add_argument("--gcs-project", default=os.getenv("GCS_PROJECT", ""))
-    parser.add_argument("--gcs-credentials", default=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""))
+    parser.add_argument("--gcs-project", default=_GCS_PROJECT)
+    parser.add_argument("--gcs-credentials", default=_GCS_CREDS)
 
-    # Context file keys (cloud) or paths (local)
-    parser.add_argument("--eia-key", default=None, help="EIA storage cache (S3/GCS key or local path)")
-    parser.add_argument("--weather-key", default=None, help="Population-weighted weather (S3/GCS key or local path)")
+    # Context file keys (cloud) or paths (local) — defaults use model_data/ prefix
+    parser.add_argument("--eia-key", default=os.getenv("EIA_CACHE_DIR", _MODEL_DATA_DIR) + "ng_eia_cache.hdf",
+                        help="EIA storage cache (S3/GCS key or local path)")
+    parser.add_argument("--weather-key", default=os.getenv("WEATHER_CACHE_DIR", _MODEL_DATA_DIR) + "new_weather.hdf",
+                        help="Population-weighted weather (S3/GCS key or local path)")
     parser.add_argument("--spline-key", default=None, help="SplineTransformer pickle (S3/GCS key or local path)")
     parser.add_argument("--daily-features-key", default=None, help="Pre-computed daily features (S3/GCS key or local path)")
 
@@ -335,8 +352,9 @@ def main():
     parser.add_argument("--weather-config-dir", default=None,
                         help="Directory for PopulationWeatherGrid config JSONs")
 
-    # Model
-    parser.add_argument("--model-path", required=True, help="HybridMixtureNetwork checkpoint")
+    # Model — default searches results/ directory
+    parser.add_argument("--model-path", default=None,
+                        help="HybridMixtureNetwork checkpoint (default: auto-detect from results/)")
     parser.add_argument("--config-path", default=None, help="HybridConfig JSON (if not in checkpoint)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
@@ -359,6 +377,17 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
     logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+
+    # Auto-detect model checkpoint from results/ if not specified
+    if args.model_path is None:
+        results_dir = Path(_RESULTS_DIR)
+        candidates = sorted(results_dir.glob("*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+        candidates += sorted(results_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            args.model_path = str(candidates[0])
+            logger.info("Auto-detected model checkpoint: %s", args.model_path)
+        else:
+            parser.error(f"--model-path not specified and no .pth/.pt files found in {results_dir}")
 
     device = torch.device(args.device)
 
