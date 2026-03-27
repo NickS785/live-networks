@@ -25,6 +25,7 @@ env/*
 !env/dot.env
 !env/gcs_service_account.json
 
+
 # Model artifacts (large files)
 *.pth
 *.pt
