@@ -18,8 +18,15 @@ except Exception:
     S3TickerSpec = None  # type: ignore
     S3TickDataSource = None  # type: ignore
 
+try:
+    from .sierra_tick_source import SierraConfig, SierraChartTickDataSource
+except Exception:
+    SierraConfig = None  # type: ignore
+    SierraChartTickDataSource = None  # type: ignore
+
 __all__ = [
     "IBKRConfig", "IBKRContract", "IBKRTickDataSource",
     "GCSConfig", "GCSTickerSpec", "GCSTickDataSource",
     "S3TickerSpec", "S3TickDataSource",
+    "SierraConfig", "SierraChartTickDataSource",
 ]
