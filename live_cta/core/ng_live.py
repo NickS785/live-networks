@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import torch
 
 from .live import (
     LiveEvaluationConfig,
@@ -238,11 +237,14 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
         data_source: TickDataSource,
         daily_paths: Optional[DailyContextPaths] = None,
         ae_window: int = 21,
+        feature_cols: Optional[Sequence[str]] = None,
         spline_transformer=None,
     ) -> None:
         super().__init__(config, data_source)
         self.daily_paths = daily_paths or DailyContextPaths()
         self.ae_window = ae_window
+        self.feature_cols = list(feature_cols) if feature_cols is not None else None
+        self._missing_feature_cols_logged = False
 
         # Caches for daily data (loaded lazily or refreshed externally)
         self._eia_cache: Optional[pd.DataFrame] = None
@@ -283,6 +285,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
         daily_context = self._get_daily_context(anchor_ts)
         if daily_context is not None:
             snapshot.sample["daily_context"] = daily_context
+        self._apply_daily_context_features(snapshot, daily_context or {})
 
         # Build regime encoder input
         regime_input = self._compute_regime_input(anchor_ts, snapshot.bars)
@@ -333,7 +336,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             logger.warning("EIA cache not found: %s", path)
             return None
         try:
-            if p.suffix == ".h5":
+            if p.suffix in {".h5", ".hdf"}:
                 df = pd.read_hdf(path)
             elif p.suffix == ".parquet":
                 df = pd.read_parquet(path)
@@ -353,7 +356,9 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             logger.warning("Weather cache not found: %s", path)
             return None
         try:
-            if p.suffix == ".parquet":
+            if p.suffix in {".h5", ".hdf"}:
+                df = pd.read_hdf(path)
+            elif p.suffix == ".parquet":
                 df = pd.read_parquet(path)
             else:
                 df = pd.read_csv(path, parse_dates=True, index_col=0)
@@ -443,6 +448,73 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
     # Feature assembly
     # ------------------------------------------------------------------
 
+    def _build_technical_frame(self) -> Tuple[pd.DataFrame, List[str]]:
+        """Mirror the ng_hybrid notebook's ContinuousIntradayPrep settings."""
+        steps = self.config.target_horizon_minutes // self.config.bar_minutes
+        add_bid_ask = any(
+            col in self._bars.columns
+            for col in ("bidvol", "askvol", "BidVolume", "AskVolume")
+        )
+        df_out, _, _ = self.prep.prepare(
+            self._bars,
+            steps_60m=steps,
+            keep_only_active=False,
+            add_daily=True,
+            add_overnight=True,
+            add_deseas=True,
+            add_time_features=True,
+            add_resample_precalc=False,
+            apply_scaling=False,
+            add_bid_ask=add_bid_ask,
+            add_event_markers=False,
+        )
+        df_out.columns = [str(col).lower() for col in df_out.columns]
+
+        feat_cols = self.prep.get_feature_cols(
+            steps_60m=steps,
+            bar_minutes=self.config.bar_minutes,
+            add_resample_precalc=False,
+            add_bid_ask=False,
+            add_event_markers=False,
+        )
+        feat_cols = [str(col).lower() for col in feat_cols if str(col).lower() in df_out.columns]
+        df_out[feat_cols] = df_out[feat_cols].ffill().bfill().fillna(0.0)
+        return df_out, feat_cols
+
+    def _apply_daily_context_features(
+        self,
+        snapshot: LiveFeatureSnapshot,
+        daily_context: Dict[str, float],
+    ) -> None:
+        tech_cols = list(snapshot.sample.get("tech_feature_cols", []))
+        if not tech_cols:
+            return
+
+        tech_df = pd.DataFrame(snapshot.sample["tech_features"], columns=tech_cols)
+        for key, value in daily_context.items():
+            tech_df[key] = float(value)
+
+        if self.feature_cols:
+            missing = [col for col in self.feature_cols if col not in tech_df.columns]
+            if missing and not self._missing_feature_cols_logged:
+                logger.warning(
+                    "Missing %d checkpoint feature columns in live assembly; zero-filling. "
+                    "Examples: %s",
+                    len(missing),
+                    missing[:10],
+                )
+                self._missing_feature_cols_logged = True
+            for col in missing:
+                tech_df[col] = 0.0
+            tech_df = tech_df.loc[:, self.feature_cols]
+            snapshot.sample["tech_feature_cols"] = list(self.feature_cols)
+        else:
+            ordered = tech_cols + [col for col in daily_context if col not in tech_cols]
+            tech_df = tech_df.loc[:, ordered]
+            snapshot.sample["tech_feature_cols"] = ordered
+
+        snapshot.sample["tech_features"] = tech_df.astype(np.float32).values
+
     def _get_daily_context(self, anchor_ts: pd.Timestamp) -> Optional[Dict[str, float]]:
         """Extract daily EIA/weather context for the anchor date.
 
@@ -466,7 +538,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             if mask.any():
                 latest = eia.loc[mask].iloc[-1]
                 for col in eia.columns:
-                    context[f"eia_{col}"] = float(latest[col]) if pd.notna(latest[col]) else 0.0
+                    context[col] = float(latest[col]) if pd.notna(latest[col]) else 0.0
 
         # Use processed weather features (HDD/CDD/spline/wtd_tavg) if available,
         # otherwise fall back to raw weather cache
@@ -502,8 +574,8 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
         self,
         anchor_ts: pd.Timestamp,
         bars: pd.DataFrame,
-    ) -> Optional[torch.Tensor]:
-        """Build the VAE regime encoder input: ``(1, ae_window, 12)``.
+    ) -> Optional[np.ndarray]:
+        """Build the VAE regime encoder input: ``(ae_window, 12)``.
 
         Computes the 12 regime features from available bar data and
         daily context caches. Returns ``None`` if insufficient data.
@@ -581,7 +653,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
         # Replace any NaN/inf with 0
         regime_arr = np.nan_to_num(regime_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
-        return torch.from_numpy(regime_arr).unsqueeze(0)  # (1, ae_window, 12)
+        return regime_arr
 
     def _get_storage_regime_features(
         self, anchor_ts: pd.Timestamp

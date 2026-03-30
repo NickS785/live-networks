@@ -24,9 +24,15 @@ except Exception:
     SierraConfig = None  # type: ignore
     SierraChartTickDataSource = None  # type: ignore
 
+try:
+    from .history_backfill_source import HistoricalBackfillDataSource
+except Exception:
+    HistoricalBackfillDataSource = None  # type: ignore
+
 __all__ = [
     "IBKRConfig", "IBKRContract", "IBKRTickDataSource",
     "GCSConfig", "GCSTickerSpec", "GCSTickDataSource",
     "S3TickerSpec", "S3TickDataSource",
     "SierraConfig", "SierraChartTickDataSource",
+    "HistoricalBackfillDataSource",
 ]

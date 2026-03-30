@@ -64,19 +64,36 @@ def _ensure_datetime_index(df: pd.DataFrame, tz: str) -> pd.DataFrame:
     return out
 
 
-def _ensure_tick_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _rename_price_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     rename_map: Dict[str, str] = {}
     for col in out.columns:
-        lower = col.lower()
+        lower = str(col).strip().lower().replace(" ", "")
         if lower == "last":
             rename_map[col] = "Close"
-        elif lower == "volume":
+        elif lower == "open":
+            rename_map[col] = "Open"
+        elif lower == "high":
+            rename_map[col] = "High"
+        elif lower == "low":
+            rename_map[col] = "Low"
+        elif lower in {"volume", "vol"}:
+            rename_map[col] = "Volume"
+        elif lower == "totalvolume":
             rename_map[col] = "TotalVolume"
-        elif lower == "numtrades":
+        elif lower == "bidvolume":
+            rename_map[col] = "BidVolume"
+        elif lower == "askvolume":
+            rename_map[col] = "AskVolume"
+        elif lower in {"numtrades", "numberoftrades"}:
             rename_map[col] = "NumTrades"
     if rename_map:
         out = out.rename(columns=rename_map)
+    return out
+
+
+def _ensure_tick_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = _rename_price_columns(df)
 
     if "Close" not in out.columns:
         raise KeyError("Tick data must contain a 'Close' or 'Last' column.")
@@ -85,6 +102,7 @@ def _ensure_tick_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["BidVolume"] = 0.0
     if "AskVolume" not in out.columns:
         out["AskVolume"] = 0.0
+    # Derive TotalVolume from BidVolume + AskVolume; accept existing column as fallback
     if "TotalVolume" not in out.columns:
         out["TotalVolume"] = (
             pd.to_numeric(out["BidVolume"], errors="coerce").fillna(0.0)
@@ -98,6 +116,60 @@ def _ensure_tick_columns(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     return out
+
+
+def _looks_like_bar_data(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    cols = {str(col).strip().lower().replace(" ", "") for col in df.columns}
+    required = {"open", "high", "low"}
+    return required.issubset(cols)
+
+
+def _ensure_bar_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = _rename_price_columns(df)
+    if "Close" not in out.columns:
+        raise KeyError("Bar data must contain a 'Close' or 'Last' column.")
+
+    close = pd.to_numeric(out["Close"], errors="coerce")
+    out["Open"] = pd.to_numeric(out.get("Open", close), errors="coerce").fillna(close)
+    out["High"] = pd.to_numeric(out.get("High", close), errors="coerce").fillna(close)
+    out["Low"] = pd.to_numeric(out.get("Low", close), errors="coerce").fillna(close)
+
+    if "Volume" in out.columns:
+        volume = pd.to_numeric(out["Volume"], errors="coerce").fillna(0.0)
+    elif "TotalVolume" in out.columns:
+        volume = pd.to_numeric(out["TotalVolume"], errors="coerce").fillna(0.0)
+    else:
+        bid = pd.to_numeric(out.get("BidVolume", 0.0), errors="coerce").fillna(0.0)
+        ask = pd.to_numeric(out.get("AskVolume", 0.0), errors="coerce").fillna(0.0)
+        volume = bid + ask
+    out["Volume"] = volume
+
+    for col in ("Open", "High", "Low", "Close", "Volume"):
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    return out
+
+
+def _merge_time_series_frames(
+    existing: pd.DataFrame,
+    incoming: pd.DataFrame,
+    *,
+    lookback_start: pd.Timestamp,
+) -> pd.DataFrame:
+    if existing.empty:
+        combined = incoming.copy()
+    elif incoming.empty:
+        combined = existing.copy()
+    else:
+        combined = pd.concat([existing, incoming], axis=0)
+        combined = combined[~combined.index.duplicated(keep="last")]
+        combined = combined.sort_index()
+
+    if combined.empty:
+        return combined
+    return combined.loc[combined.index >= lookback_start].copy()
 
 
 def _parse_hhmm(value: str) -> time:
@@ -586,7 +658,12 @@ class LiveV3FeatureInterface:
         refresh_bucket = _floor_timestamp(current, self.config.refresh_interval)
 
         self._update_tick_cache(current)
-        self._bars = _resample_ticks_to_bars(self._raw_ticks, self.config.bar_minutes)
+        if self._raw_ticks.empty:
+            self._bars = _ensure_datetime_index(self._bars, self.config.tz)
+            if not self._bars.empty:
+                self._bars = _ensure_bar_columns(self._bars)
+        else:
+            self._bars = _resample_ticks_to_bars(self._raw_ticks, self.config.bar_minutes)
         snapshot = self._build_snapshot(current)
 
         self.trade_ledger.close_due_trades(snapshot.bars, asof=current)
@@ -639,6 +716,8 @@ class LiveV3FeatureInterface:
         overlap_start = lookback_start
         if not self._raw_ticks.empty:
             overlap_start = max(lookback_start, self._raw_ticks.index.max() - pd.Timedelta(hours=2))
+        if not self._bars.empty:
+            overlap_start = max(lookback_start, self._bars.index.max() - pd.Timedelta(days=2))
 
         fetched = self.data_source.get_ticks(
             self.config.ticker,
@@ -646,21 +725,27 @@ class LiveV3FeatureInterface:
             end_time=now,
         )
         fetched = _ensure_datetime_index(fetched, self.config.tz)
-        fetched = _ensure_tick_columns(fetched)
 
-        if self._raw_ticks.empty:
-            combined = fetched
+        if _looks_like_bar_data(fetched):
+            fetched = _ensure_bar_columns(fetched)
+            self._bars = _merge_time_series_frames(
+                self._bars,
+                fetched,
+                lookback_start=lookback_start,
+            )
+            self._raw_ticks = pd.DataFrame()
         else:
-            combined = pd.concat([self._raw_ticks, fetched], axis=0)
-            combined = combined[~combined.index.duplicated(keep="last")]
-            combined = combined.sort_index()
-
-        combined = combined.loc[combined.index >= lookback_start]
-        self._raw_ticks = combined
+            fetched = _ensure_tick_columns(fetched)
+            self._raw_ticks = _merge_time_series_frames(
+                self._raw_ticks,
+                fetched,
+                lookback_start=lookback_start,
+            )
+            self._bars = pd.DataFrame()
 
     def _build_snapshot(self, now: pd.Timestamp) -> LiveFeatureSnapshot:
-        if self._raw_ticks.empty or self._bars.empty:
-            raise ValueError("No tick data available to build live features.")
+        if self._bars.empty:
+            raise ValueError("No market data available to build live features.")
 
         tech_df, feat_cols = self._build_technical_frame()
         anchor_ts = self._select_anchor_ts(tech_df, now)
@@ -718,7 +803,8 @@ class LiveV3FeatureInterface:
         return eligible.index[-1]
 
     def _iter_feature_dates(self, now: pd.Timestamp) -> List[date]:
-        idx = self._raw_ticks.index[self._raw_ticks.index <= now]
+        source = self._raw_ticks if not self._raw_ticks.empty else self._bars
+        idx = source.index[source.index <= now]
         return sorted(set(idx.date))
 
     def _build_orderflow_modalities(
@@ -770,14 +856,17 @@ class LiveV3FeatureInterface:
         d: date,
         now: pd.Timestamp,
     ) -> Tuple[pd.DataFrame, Optional[Tuple[np.ndarray, np.ndarray]], np.ndarray]:
-        current_day_end = min(now, _combine_date_time(d, "23:59", self.config.tz))
-        vpin_start = _combine_date_time(d, self.config.vpin_start_time, self.config.tz)
-        vpin_end = min(_combine_date_time(d, self.config.vpin_end_time, self.config.tz), current_day_end)
-
         empty_raster = np.zeros(
             (self.config.raster_num_bars, 4, self.config.raster_bins),
             dtype=np.float32,
         )
+        if self._raw_ticks.empty:
+            return pd.DataFrame(), None, empty_raster
+
+        current_day_end = min(now, _combine_date_time(d, "23:59", self.config.tz))
+        vpin_start = _combine_date_time(d, self.config.vpin_start_time, self.config.tz)
+        vpin_end = min(_combine_date_time(d, self.config.vpin_end_time, self.config.tz), current_day_end)
+
         if vpin_end <= vpin_start:
             return pd.DataFrame(), None, empty_raster
 
@@ -980,6 +1069,7 @@ class LiveV3FeatureInterface:
 
         sample: Dict[str, Any] = {
             "tech_features": tech_features,
+            "tech_feature_cols": list(feat_cols),
             "tech_len": int(len(tech_slice)),
             "seq_vpin": seq_data,
             "seq_vpin_len": int(len(seq_data)),

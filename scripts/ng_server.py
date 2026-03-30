@@ -71,6 +71,7 @@ from live_cta.core.ng_live import (
     NatGasLiveInterface,
 )
 from live_cta.sources.gcs_tick_source import GCSConfig, GCSTickerSpec, GCSTickDataSource
+from live_cta.sources.history_backfill_source import HistoricalBackfillDataSource
 
 logger = logging.getLogger("ng_server")
 
@@ -204,10 +205,32 @@ def download_model_from_gcs(
 # Model loading
 # ---------------------------------------------------------------------------
 
+
+def _detect_format(key: str) -> str:
+    if key.endswith(".tar.gz"):
+        return "tar.gz"
+    if key.endswith(".csv"):
+        return "csv"
+    return "parquet"
+
+
+def _parse_session(session_meta: Any) -> SessionSpec:
+    if isinstance(session_meta, dict):
+        return SessionSpec(
+            session_meta.get("name", "USA"),
+            session_meta.get("start", "02:30"),
+            session_meta.get("end", "15:00"),
+        )
+    if isinstance(session_meta, str) and "_" in session_meta and "-" in session_meta:
+        name, times = session_meta.split("_", 1)
+        start, end = times.split("-", 1)
+        return SessionSpec(name, start, end)
+    return SESSION
+
 def load_model(
     model_path: str,
     device: torch.device,
-) -> HybridMixtureNetwork:
+) -> tuple[HybridMixtureNetwork, Dict[str, Any]]:
     """Load best HybridMixtureNetwork from an Optuna checkpoint.
 
     Checkpoint keys (from notebook):
@@ -262,7 +285,16 @@ def load_model(
             checkpoint.get("session", asdict(SESSION)),
         )
     logger.info("Loaded HybridMixtureNetwork from %s (%s)", model_path, device)
-    return model
+    checkpoint_meta = {
+        "feature_cols": checkpoint.get("feature_cols"),
+        "regime_cols": checkpoint.get("regime_cols"),
+        "feature_groups": checkpoint.get("feature_groups"),
+        "bar_minutes": checkpoint.get("bar_minutes", BAR_MINUTES),
+        "target_horizon_bars": checkpoint.get("target_horizon_bars", TARGET_HORIZON_BARS),
+        "session": checkpoint.get("session", asdict(SESSION)),
+        "ae_window_bars": checkpoint.get("ae_window_bars", AE_WINDOW_BARS),
+    }
+    return model, checkpoint_meta
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +486,8 @@ def main():
     parser.add_argument("--gcs-bucket", default=_GCS_BUCKET)
     parser.add_argument("--gcs-project", default=_GCS_PROJECT)
     parser.add_argument("--gcs-credentials", default=_GCS_CREDS)
-    parser.add_argument("--gcs-tick-key", default=f"{_GCS_PREFIX}NG_latest.parquet",
-                        help="GCS object path for NG tick data")
+    parser.add_argument("--gcs-tick-key", default=f"{_GCS_PREFIX}NG_latest.tar.gz",
+                        help="GCS object path for the latest NG live segment")
 
     # Daily context — defaults point to known GCS artifacts
     parser.add_argument("--context-backend", choices=["gcs", "local"], default="gcs",
@@ -513,11 +545,18 @@ def main():
             checkpoint_name=args.model_name,
         ))
 
-    # --- Load model ---
-    model = load_model(model_path, device)
+    # --- Load model metadata and weights ---
+    model, checkpoint_meta = load_model(model_path, device)
+    checkpoint_bar_minutes = int(checkpoint_meta.get("bar_minutes") or args.bar_minutes)
+    checkpoint_horizon_bars = int(
+        checkpoint_meta.get("target_horizon_bars") or TARGET_HORIZON_BARS
+    )
+    checkpoint_session = _parse_session(checkpoint_meta.get("session"))
+    checkpoint_feature_cols = checkpoint_meta.get("feature_cols") or None
+    live_fmt = _detect_format(args.gcs_tick_key)
     gcs_source = GCSTickDataSource(
         config=gcs_config,
-        ticker_map={"NG": GCSTickerSpec(args.gcs_tick_key, fmt="parquet")},
+        ticker_map={"NG": GCSTickerSpec(args.gcs_tick_key, fmt=live_fmt)},
     )
 
     # --- Resolve daily context + cached intraday from GCS ---
@@ -542,21 +581,28 @@ def main():
 
     if intraday_path:
         logger.info("  Intraday (5min cache): %s", intraday_path)
+        data_source = HistoricalBackfillDataSource(
+            gcs_source,
+            history_map={"NG": intraday_path},
+            tz=TZ,
+        )
+    else:
+        data_source = gcs_source
 
     # --- NatGasLiveInterface with notebook-matched config ---
     live_cfg = LiveEvaluationConfig(
         ticker="NG",
         tick_size=0.001,
         tz=TZ,
-        bar_minutes=args.bar_minutes,
-        target_horizon_minutes=args.bar_minutes * TARGET_HORIZON_BARS,
-        refresh_interval=f"{args.bar_minutes}min",
+        bar_minutes=checkpoint_bar_minutes,
+        target_horizon_minutes=checkpoint_bar_minutes * checkpoint_horizon_bars,
+        refresh_interval=f"{checkpoint_bar_minutes}min",
         history_lookback_days=args.lookback_days,
-        sessions=[SESSION],
+        sessions=[checkpoint_session],
         vpin_bucket_volume=150,
         vpin_window=60,
-        vpin_start_time=SESSION.start,
-        vpin_end_time=SESSION.end,
+        vpin_start_time=checkpoint_session.start,
+        vpin_end_time=checkpoint_session.end,
         profile_start_time="02:00",
         profile_end_time="09:30",
         ae_window=args.ae_window,
@@ -570,9 +616,10 @@ def main():
 
     interface = NatGasLiveInterface(
         config=live_cfg,
-        data_source=gcs_source,
+        data_source=data_source,
         daily_paths=daily_paths,
         ae_window=args.ae_window,
+        feature_cols=checkpoint_feature_cols,
     )
 
     # Stash cached intraday path on the interface for future backfill use.
@@ -590,9 +637,9 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
 
     logger.info(
-        "NG Server ready: gcs=gs://%s/%s | model=%s | bar=%dmin | ae=%dd",
-        args.gcs_bucket, args.gcs_tick_key, model_path,
-        args.bar_minutes, args.ae_window,
+        "NG Server ready: gcs=gs://%s/%s (%s) | model=%s | bar=%dmin | ae=%dd",
+        args.gcs_bucket, args.gcs_tick_key, live_fmt, model_path,
+        checkpoint_bar_minutes, args.ae_window,
     )
     if eia_path:
         logger.info("  EIA      : %s", eia_path)

@@ -81,6 +81,15 @@ def build_s3_source():
     )
 
 
+def _detect_format(key: str) -> str:
+    """Infer data format from the GCS object key extension."""
+    if key.endswith(".tar.gz"):
+        return "tar.gz"
+    elif key.endswith(".csv"):
+        return "csv"
+    return "parquet"
+
+
 def build_gcs_source():
     from live_cta.sources.gcs_tick_source import GCSConfig, GCSTickerSpec, GCSTickDataSource
 
@@ -89,9 +98,10 @@ def build_gcs_source():
         project=GCS_PROJECT or None,
         credentials_path=GCS_CREDENTIALS or None,
     )
+    fmt = _detect_format(LIVE_DATA_KEY)
     return GCSTickDataSource(
         config=cfg,
-        ticker_map={"NG": GCSTickerSpec(LIVE_DATA_KEY)},
+        ticker_map={"NG": GCSTickerSpec(LIVE_DATA_KEY, fmt=fmt)},
         tz=TZ,
     )
 

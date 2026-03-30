@@ -8,6 +8,7 @@ Requires ``google-cloud-storage``: ``pip install google-cloud-storage``
 from __future__ import annotations
 
 import logging
+import tarfile
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -136,6 +137,14 @@ class GCSTickDataSource:
             return pd.read_parquet(BytesIO(data))
         elif spec.fmt == "csv":
             return pd.read_csv(BytesIO(data), parse_dates=True)
+        elif spec.fmt == "tar.gz":
+            with tarfile.open(fileobj=BytesIO(data), mode="r:gz") as tar:
+                members = [m for m in tar.getmembers() if m.name.endswith(".parquet")]
+                if not members:
+                    logger.warning("No .parquet file found in tar.gz archive")
+                    return pd.DataFrame()
+                f = tar.extractfile(members[0])
+                return pd.read_parquet(BytesIO(f.read()))
         else:
             raise ValueError(f"Unsupported format: {spec.fmt!r}")
 
@@ -195,10 +204,10 @@ class GCSTickDataSource:
         blob = bucket.blob(spec.file_path)
 
         content_type = "application/octet-stream"
-        if target_fmt == "parquet":
-            content_type = "application/octet-stream"
-        elif target_fmt == "csv":
+        if target_fmt == "csv":
             content_type = "text/csv"
+        elif target_fmt == "tar.gz":
+            content_type = "application/gzip"
 
         blob.upload_from_filename(str(local_path), content_type=content_type)
         uri = f"gs://{self.config.bucket_name}/{spec.file_path}"

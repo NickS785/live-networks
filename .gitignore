@@ -19,11 +19,8 @@ venv/
 .DS_Store
 Thumbs.db
 
-# --- env/ folder ---
-# Track the folder and blank templates, ignore real credentials and config
-env/*
-!env/dot.env
-!env/gcs_service_account.json
+# --- env/ folder (contains secrets — never track) ---
+env/
 
 
 # Model artifacts (large files)
