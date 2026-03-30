@@ -31,6 +31,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # Load dotenv before anything else
 from dotenv import load_dotenv
@@ -99,8 +100,8 @@ def sync_cycle(
 
 def sync_daily_context(
     gcs_config: GCSConfig,
-    eia_path: str | None,
-    weather_path: str | None,
+    eia_path: Optional[str],
+    weather_path: Optional[str],
 ) -> dict:
     """Upload local EIA/weather caches to GCS so the server can fetch them."""
     try:

@@ -32,6 +32,7 @@ import signal
 import sys
 import time
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger("sierra_feeder")
 
@@ -72,7 +73,7 @@ def run_sync(
     resample_rule: str,
     data_dir: str,
     use_csv: bool,
-) -> str | None:
+) -> Optional[str]:
     """Run a single sync cycle for one ticker."""
     from live_cta.sources.sierra_tick_source import (
         NEEDS_TICK_DATA,

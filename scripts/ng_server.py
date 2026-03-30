@@ -48,7 +48,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Load dotenv before anything else
 from dotenv import load_dotenv
@@ -140,7 +140,7 @@ def _handle_signal(signum, frame):
 def download_model_from_gcs(
     gcs_config: GCSConfig,
     results_prefix: str = "results/",
-    checkpoint_name: str | None = None,
+    checkpoint_name: Optional[str] = None,
 ) -> Path:
     """Download the best model checkpoint from ``gs://<bucket>/<results_prefix>``.
 
@@ -230,7 +230,7 @@ def _parse_session(session_meta: Any) -> SessionSpec:
 def load_model(
     model_path: str,
     device: torch.device,
-) -> tuple[HybridMixtureNetwork, Dict[str, Any]]:
+) -> Tuple[HybridMixtureNetwork, Dict[str, Any]]:
     """Load best HybridMixtureNetwork from an Optuna checkpoint.
 
     Checkpoint keys (from notebook):
