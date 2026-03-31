@@ -178,9 +178,10 @@ def load_model(
     # "feature_group_sizes" (list) or "feature_groups" (dict of name -> cols)
     feature_group_sizes = checkpoint.get("feature_group_sizes", None)
     if feature_group_sizes is None and "feature_groups" in checkpoint:
-        feature_group_sizes = [
-            len(cols) for cols in checkpoint["feature_groups"].values()
-        ]
+        # Preserve as dict {group_name: n_features} for GroupedFeatureVSN
+        feature_group_sizes = {
+            name: len(cols) for name, cols in checkpoint["feature_groups"].items()
+        }
         logger.info("Derived feature_group_sizes from feature_groups: %s", feature_group_sizes)
     model = HybridMixtureNetwork(cfg, feature_group_sizes=feature_group_sizes)
 
