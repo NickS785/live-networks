@@ -58,6 +58,11 @@ def _compress_for_upload(local_path: Union[str, Path]) -> Path:
     return archive_path
 
 
+def _is_tar_gz_path(local_path: Union[str, Path]) -> bool:
+    source = Path(local_path)
+    return source.suffixes[-2:] == [".tar", ".gz"]
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -198,7 +203,8 @@ class S3TickDataSource:
         Returns the ``s3://`` URI of the uploaded object.
         """
         spec = self.ticker_map[ticker]
-        archive_path = _compress_for_upload(local_path)
+        source_path = Path(local_path)
+        archive_path = source_path if _is_tar_gz_path(source_path) else _compress_for_upload(source_path)
         try:
             self._aws.upload_file(str(archive_path), spec.key)
             full_key = self._aws._add_prefix(spec.key)
@@ -206,4 +212,5 @@ class S3TickDataSource:
             logger.info("Uploaded %s as compressed payload -> %s", local_path, uri)
             return uri
         finally:
-            archive_path.unlink(missing_ok=True)
+            if archive_path != source_path:
+                archive_path.unlink(missing_ok=True)

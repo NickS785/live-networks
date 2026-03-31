@@ -55,6 +55,11 @@ def _compress_for_upload(local_path: Union[str, Path]) -> Path:
         tar.add(source, arcname=source.name)
     return archive_path
 
+
+def _is_tar_gz_path(local_path: Union[str, Path]) -> bool:
+    source = Path(local_path)
+    return source.suffixes[-2:] == [".tar", ".gz"]
+
 try:
     from google.cloud import storage as gcs_storage
 
@@ -248,12 +253,13 @@ class GCSTickDataSource:
         target_fmt = fmt or spec.fmt
         bucket = self._get_bucket()
         blob = bucket.blob(spec.file_path)
-
-        archive_path = _compress_for_upload(local_path)
+        source_path = Path(local_path)
+        archive_path = source_path if _is_tar_gz_path(source_path) else _compress_for_upload(source_path)
         try:
             blob.upload_from_filename(str(archive_path), content_type="application/gzip")
             uri = f"gs://{self.config.bucket_name}/{spec.file_path}"
             logger.info("Uploaded %s as compressed %s payload -> %s", local_path, target_fmt, uri)
             return uri
         finally:
-            archive_path.unlink(missing_ok=True)
+            if archive_path != source_path:
+                archive_path.unlink(missing_ok=True)
