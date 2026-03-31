@@ -53,7 +53,7 @@ def _ensure_datetime_index(df: pd.DataFrame, tz: str) -> pd.DataFrame:
         else:
             raise TypeError("Tick DataFrame must have a DatetimeIndex or a 'Datetime'/'ts' column.")
 
-    out.index = pd.to_datetime(out.index)
+    out.index = pd.to_datetime(out.index).as_unit("ns")
     if out.index.tz is None:
         out.index = out.index.tz_localize(tz)
     else:
