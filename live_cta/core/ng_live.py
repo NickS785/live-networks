@@ -27,6 +27,42 @@ from .live import (
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_dt_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure a DataFrame's DatetimeIndex uses nanosecond resolution (tz-naive).
+
+    Prevents ``TypeError: Invalid comparison between dtype=datetime64[us] and
+    Timestamp`` on pandas < 2.1 where mixed resolutions aren't auto-coerced.
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    try:
+        df.index = df.index.as_unit("ns")
+    except AttributeError:
+        pass  # pandas < 2.0 already uses ns
+    return df
+
+
+def _safe_date_mask(index: pd.DatetimeIndex, anchor: pd.Timestamp, op: str = "le") -> pd.Series:
+    """Compare a DatetimeIndex against a Timestamp, handling tz/resolution mismatches.
+
+    Strips timezone from both sides and compares as naive timestamps to avoid
+    ``TypeError: Invalid comparison between dtype=datetime64[us] and Timestamp``.
+    """
+    idx = index.tz_localize(None) if index.tz is not None else index
+    try:
+        idx = idx.as_unit("ns")
+    except AttributeError:
+        pass
+    ref = anchor.tz_localize(None) if anchor.tzinfo is not None else anchor
+    if op == "le":
+        return idx <= ref
+    elif op == "ge":
+        return idx >= ref
+    return idx == ref
+
 # ---------------------------------------------------------------------------
 # Weather feature processing (self-contained for inference without macrOS-Int)
 # ---------------------------------------------------------------------------
@@ -342,6 +378,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
                 df = pd.read_parquet(path)
             else:
                 df = pd.read_csv(path, parse_dates=True, index_col=0)
+            df = _normalize_dt_index(df)
             logger.info("Loaded EIA cache: %d rows from %s", len(df), path)
             return df
         except Exception as exc:
@@ -362,6 +399,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
                 df = pd.read_parquet(path)
             else:
                 df = pd.read_csv(path, parse_dates=True, index_col=0)
+            df = _normalize_dt_index(df)
             logger.info("Loaded weather cache: %d rows from %s", len(df), path)
             return df
         except Exception as exc:
@@ -438,6 +476,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
                 df = pd.read_parquet(path)
             else:
                 df = pd.read_csv(path, parse_dates=True, index_col=0)
+            df = _normalize_dt_index(df)
             logger.info("Loaded daily features: %d rows from %s", len(df), path)
             return df
         except Exception as exc:
@@ -534,7 +573,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             if not isinstance(eia.index, pd.DatetimeIndex):
                 eia.index = pd.to_datetime(eia.index)
             # Forward-fill: take most recent row <= anchor_date
-            mask = eia.index <= anchor_date
+            mask = _safe_date_mask(eia.index, anchor_date)
             if mask.any():
                 latest = eia.loc[mask].iloc[-1]
                 for col in eia.columns:
@@ -551,7 +590,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             wx = wx_source
             if not isinstance(wx.index, pd.DatetimeIndex):
                 wx.index = pd.to_datetime(wx.index)
-            mask = wx.index <= anchor_date
+            mask = _safe_date_mask(wx.index, anchor_date)
             if mask.any():
                 latest = wx.loc[mask].iloc[-1]
                 for col in wx.columns:
@@ -562,7 +601,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             df = self._daily_features_cache
             if not isinstance(df.index, pd.DatetimeIndex):
                 df.index = pd.to_datetime(df.index)
-            mask = df.index <= anchor_date
+            mask = _safe_date_mask(df.index, anchor_date)
             if mask.any():
                 latest = df.loc[mask].iloc[-1]
                 for col in df.columns:
@@ -667,7 +706,7 @@ class NatGasLiveInterface(LiveV3FeatureInterface):
             eia.index = pd.to_datetime(eia.index)
 
         anchor_date = anchor_ts.normalize()
-        mask = eia.index <= anchor_date
+        mask = _safe_date_mask(eia.index, anchor_date)
         if not mask.any():
             return None
 
