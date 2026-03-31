@@ -109,6 +109,23 @@ def build_gcs_source():
     )
 
 
+def _parse_session(session_meta: Any) -> SessionSpec:
+    """Normalize checkpoint session metadata into a SessionSpec."""
+    if isinstance(session_meta, SessionSpec):
+        return session_meta
+    if isinstance(session_meta, dict):
+        return SessionSpec(
+            session_meta.get("name", "USA"),
+            session_meta.get("start", "02:30"),
+            session_meta.get("end", "15:00"),
+        )
+    if isinstance(session_meta, str) and "_" in session_meta and "-" in session_meta:
+        name, times = session_meta.split("_", 1)
+        start, end = times.split("-", 1)
+        return SessionSpec(name, start, end)
+    return SessionSpec("USA", "02:30", "15:00")
+
+
 # ---------------------------------------------------------------------------
 # GCS artifact download
 # ---------------------------------------------------------------------------
@@ -226,11 +243,7 @@ def build_hybrid_inputs(
     ae_window_bars = checkpoint.get("ae_window_bars", 510)
     seq_len = checkpoint["config"].get("seq_len", 20)
 
-    session = checkpoint.get("session", "USA_02:30-15:00")
-    parts = session.split("_", 1)
-    sess_name = parts[0]
-    sess_times = parts[1].split("-") if len(parts) > 1 else ["02:30", "15:00"]
-    session_spec = SessionSpec(sess_name, sess_times[0], sess_times[1])
+    session_spec = _parse_session(checkpoint.get("session"))
 
     target_horizon_bars = checkpoint.get("target_horizon_bars", 10)
 
