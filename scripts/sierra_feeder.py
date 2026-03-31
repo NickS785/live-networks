@@ -32,9 +32,16 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+from live_cta.pipelines import list_pipeline_names, model_requires_tick_data
+
 logger = logging.getLogger("sierra_feeder")
+
+_env_file = os.getenv("DOTENV_PATH", str(Path(__file__).resolve().parent.parent / "env" / "dot.env"))
+load_dotenv(_env_file, override=False)
 
 # ---------------------------------------------------------------------------
 # Defaults (override via env vars or CLI args)
@@ -43,15 +50,13 @@ logger = logging.getLogger("sierra_feeder")
 SCID_FOLDER = os.getenv("SCID_FOLDER", "F:/SierraChart/Data")
 GCS_BUCKET = os.getenv("GCS_BUCKET", "ctaflow-prod-artifacts")
 GCS_PROJECT = os.getenv("GCS_PROJECT", "")
-GCS_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+_DEFAULT_GCS_CREDENTIALS = Path(__file__).resolve().parents[1] / "env" / "gcs_service_account.json"
+GCS_CREDENTIALS = os.getenv(
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    str(_DEFAULT_GCS_CREDENTIALS) if _DEFAULT_GCS_CREDENTIALS.exists() else "",
+)
 LOOKBACK_DAYS = int(os.getenv("SIERRA_FEEDER_LOOKBACK_DAYS", "30"))
 TZ = "America/Chicago"
-
-# Default CSV filenames per ticker (in scid_folder)
-DEFAULT_CSV_MAP = {
-    "NG": "ng.csv",
-    "CL": "cl.csv",
-}
 
 _running = True
 
@@ -60,6 +65,10 @@ def _handle_signal(signum, _frame):
     global _running
     logger.info("Received signal %s, shutting down...", signum)
     _running = False
+
+
+def _default_csv_map(ticker: str) -> dict[str, str]:
+    return {ticker: f"{ticker.lower()}.csv"}
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +85,15 @@ def run_sync(
 ) -> Optional[str]:
     """Run a single sync cycle for one ticker."""
     from live_cta.sources.sierra_tick_source import (
-        NEEDS_TICK_DATA,
         SierraChartTickDataSource,
         SierraConfig,
     )
     from live_cta.sources.gcs_tick_source import GCSConfig, GCSTickerSpec, GCSTickDataSource
 
-    needs_ticks = NEEDS_TICK_DATA.get(model_type, True)
+    needs_ticks = model_requires_tick_data(model_type)
 
     # Build Sierra source (CSV by default)
-    csv_map = DEFAULT_CSV_MAP if use_csv else None
+    csv_map = _default_csv_map(ticker) if use_csv else None
     sierra = SierraChartTickDataSource(
         SierraConfig(scid_folder=data_dir, tz=TZ, csv_map=csv_map),
         tickers=[ticker],
@@ -129,13 +137,14 @@ def run_sync(
 # ---------------------------------------------------------------------------
 
 def main():
+    model_choices = list_pipeline_names(include_aliases=True)
     parser = argparse.ArgumentParser(description="Sierra Chart -> GCS feeder")
     parser.add_argument("--ticker", required=True, help="Ticker symbol (e.g. NG)")
     parser.add_argument(
         "--model-type",
         required=True,
-        choices=["mmtft", "ng_hybrid"],
-        help="Model type determines upload strategy: mmtft=raw ticks, ng_hybrid=resampled+compressed",
+        choices=model_choices,
+        help="Model type determines upload strategy via the live pipeline registry.",
     )
     parser.add_argument("--no-csv", action="store_true", help="Force SCID binary instead of CSV")
     parser.add_argument("--interval", type=int, default=300, help="Sync interval in seconds")

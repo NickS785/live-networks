@@ -29,3 +29,6 @@ env/
 *.ckpt
 model_data/
 results/
+/docs/prompt.md
+/.claude/settings.local.json
+/tests/test_inference_server.py

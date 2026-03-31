@@ -47,6 +47,7 @@ from live_cta.core.live import (
     _ensure_datetime_index,
     _ensure_tick_columns,
 )
+from live_cta.pipelines import list_pipeline_names, model_requires_tick_data
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 NEEDS_TICK_DATA: Dict[str, bool] = {
-    "mmtft": True,       # VPIN, profile, numbars require raw ticks
-    "ng_hybrid": False,  # Only bar-level technical features
+    name: model_requires_tick_data(name)
+    for name in list_pipeline_names(include_aliases=True)
 }
 
 

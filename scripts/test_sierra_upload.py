@@ -15,14 +15,20 @@ sys.path.insert(0, r"C:\Users\nicho\PycharmProjects\CTAFlow")
 
 import argparse
 import logging
+import os
 import time
+from pathlib import Path
 
+from dotenv import load_dotenv
+from live_cta.pipelines import list_pipeline_names, model_requires_tick_data
 from live_cta.sources.sierra_tick_source import (
-    NEEDS_TICK_DATA,
     SierraChartTickDataSource,
     SierraConfig,
 )
 from live_cta.sources.gcs_tick_source import GCSConfig, GCSTickerSpec, GCSTickDataSource
+
+_env_file = os.getenv("DOTENV_PATH", str(Path(__file__).resolve().parent.parent / "env" / "dot.env"))
+load_dotenv(_env_file, override=False)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,24 +36,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("test_sierra_upload")
 
-SCID_FOLDER = "F:/SierraChart/Data"
-GCS_BUCKET = "ctaflow-prod-artifacts"
-GCS_CREDENTIALS = "env/gcs_service_account.json"
-GCS_PROJECT = "live-trader"
+SCID_FOLDER = os.getenv("SCID_FOLDER", "F:/SierraChart/Data")
+GCS_BUCKET = os.getenv("GCS_BUCKET", "ctaflow-prod-artifacts")
+GCS_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "env/gcs_service_account.json")
+GCS_PROJECT = os.getenv("GCS_PROJECT", "live-trader")
 TICKER = "NG"
 TZ = "America/Chicago"
 
 
+def _default_csv_map(ticker: str) -> dict[str, str]:
+    return {ticker: f"{ticker.lower()}.csv"}
+
+
 def main():
+    model_choices = list_pipeline_names(include_aliases=True)
     parser = argparse.ArgumentParser(description="Test Sierra -> GCS upload with timing")
-    parser.add_argument("--model-type", default="ng_hybrid", choices=["mmtft", "ng_hybrid"])
+    parser.add_argument("--model-type", default="ng_hybrid", choices=model_choices)
     parser.add_argument("--lookback", type=int, default=30, help="Lookback in days")
     parser.add_argument("--resample", default="5min", help="Resample rule for ng_hybrid")
     parser.add_argument("--no-csv", action="store_true", help="Force SCID binary instead of CSV")
     parser.add_argument("--dry-run", action="store_true", help="Extract and compress but skip upload")
     args = parser.parse_args()
 
-    needs_ticks = NEEDS_TICK_DATA.get(args.model_type, True)
+    needs_ticks = model_requires_tick_data(args.model_type)
     use_csv = not args.no_csv
 
     if needs_ticks:
@@ -73,7 +84,7 @@ def main():
 
     # --- Step 1: Init Sierra source ---
     t0 = time.perf_counter()
-    csv_map = {"NG": "ng.csv"} if use_csv else None
+    csv_map = _default_csv_map(TICKER) if use_csv else None
     sierra = SierraChartTickDataSource(
         SierraConfig(scid_folder=SCID_FOLDER, tz=TZ, csv_map=csv_map),
         tickers=[TICKER],

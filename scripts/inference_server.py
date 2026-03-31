@@ -43,6 +43,7 @@ from live_cta.core.ng_live import (
     process_weather_features,
     _normalize_dt_index,
 )
+from live_cta.pipelines import HybridMixturePipeline
 
 logger = logging.getLogger("inference_server")
 
@@ -246,6 +247,14 @@ def build_hybrid_inputs(
 
     Returns dict with 'x_seq', 'ae_input' tensors and metadata.
     """
+    return HybridMixturePipeline.build_inputs(
+        bars_df=bars_df,
+        eia_df=eia_df,
+        weather_df=weather_df,
+        checkpoint=checkpoint,
+        spline_transformer=spline_transformer,
+    )
+
     # --- Extract checkpoint metadata ---
     feature_cols = checkpoint.get("feature_cols", [])
     feature_groups = checkpoint.get("feature_groups", {})

@@ -110,7 +110,19 @@ class GCSTickDataSource:
                     self.config.credentials_path
                 )
                 kwargs["credentials"] = creds
-            self._client = gcs_storage.Client(**kwargs)
+                if "project" not in kwargs and getattr(creds, "project_id", None):
+                    kwargs["project"] = creds.project_id
+            try:
+                self._client = gcs_storage.Client(**kwargs)
+            except Exception as exc:
+                detail = str(exc)
+                if "google.auth.default" in detail or "Your default credentials" in detail:
+                    raise RuntimeError(
+                        "Failed to initialize Google Cloud Storage client. "
+                        "Provide `GCS_PROJECT` and/or `GOOGLE_APPLICATION_CREDENTIALS`, "
+                        "or pass `project`/`credentials_path` in `GCSConfig`."
+                    ) from exc
+                raise
             self._bucket = self._client.bucket(self.config.bucket_name)
         return self._bucket
 
