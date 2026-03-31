@@ -57,7 +57,7 @@ GCS_BUCKET = os.getenv("GCS_BUCKET", "ctaflow-prod-artifacts")
 GCS_PROJECT = os.getenv("GCS_PROJECT", "")
 GCS_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
-LIVE_DATA_KEY = os.getenv("LIVE_DATA_KEY", "live_data/ng_latest.parquet")
+LIVE_DATA_KEY = os.getenv("LIVE_DATA_KEY", "live_data/NG_latest.tar.gz")
 TZ = "America/Chicago"
 
 
