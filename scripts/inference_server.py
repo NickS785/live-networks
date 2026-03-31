@@ -107,6 +107,51 @@ def build_gcs_source():
 
 
 # ---------------------------------------------------------------------------
+# GCS artifact download
+# ---------------------------------------------------------------------------
+
+CACHE_DIR = Path(os.getenv("CTAFLOW_CACHE_DIR", Path.home() / ".ctaflow" / "live_context"))
+
+
+def resolve_gcs_path(path_or_key: str) -> str:
+    """If *path_or_key* doesn't exist locally, try downloading from GCS.
+
+    Accepts either a local path (returned as-is if it exists) or a GCS key
+    like ``results/ng_hybrid_intraday_best.pth``. Downloaded files are cached
+    under ``CACHE_DIR``.
+    """
+    if Path(path_or_key).exists():
+        return path_or_key
+
+    # Treat as a GCS key — download to local cache
+    try:
+        from google.cloud import storage as gcs_storage
+    except ImportError:
+        return path_or_key  # can't download, let caller fail with FileNotFoundError
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    local = CACHE_DIR / Path(path_or_key).name
+
+    if local.exists():
+        logger.info("Using cached %s", local)
+        return str(local)
+
+    logger.info("Downloading gs://%s/%s -> %s", GCS_BUCKET, path_or_key, local)
+    kwargs = {}
+    if GCS_PROJECT:
+        kwargs["project"] = GCS_PROJECT
+    if GCS_CREDENTIALS:
+        from google.oauth2 import service_account
+        kwargs["credentials"] = service_account.Credentials.from_service_account_file(GCS_CREDENTIALS)
+    client = gcs_storage.Client(**kwargs)
+    bucket = client.bucket(GCS_BUCKET)
+    blob = bucket.blob(path_or_key)
+    blob.download_to_filename(str(local))
+    logger.info("Downloaded %.1f KB", local.stat().st_size / 1024)
+    return str(local)
+
+
+# ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
@@ -116,6 +161,7 @@ def load_model(
     config_path: Optional[str] = None,
 ) -> HybridMixtureNetwork:
     """Load a trained HybridMixtureNetwork from checkpoint."""
+    model_path = resolve_gcs_path(model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
     # Support both raw state_dict and full checkpoint format
@@ -271,17 +317,17 @@ def main():
     # Build data source
     data_source = build_s3_source() if args.backend == "s3" else build_gcs_source()
 
-    # Build live interface
+    # Build live interface — resolve context paths from GCS if not local
     live_cfg = ng_default_config()
     daily_paths = DailyContextPaths(
-        eia_storage_path=args.eia_path,
-        weather_path=args.weather_path,
-        daily_features_path=args.daily_features_path,
-        spline_transformer_path=args.spline_transformer_path,
+        eia_storage_path=resolve_gcs_path(args.eia_path) if args.eia_path else None,
+        weather_path=resolve_gcs_path(args.weather_path) if args.weather_path else None,
+        daily_features_path=resolve_gcs_path(args.daily_features_path) if args.daily_features_path else None,
+        spline_transformer_path=resolve_gcs_path(args.spline_transformer_path) if args.spline_transformer_path else None,
     )
     interface = NatGasLiveInterface(live_cfg, data_source, daily_paths=daily_paths)
 
-    # Load model
+    # Load model (auto-downloads from GCS if not local)
     model = load_model(args.model_path, device, config_path=args.config_path)
 
     if args.once:
