@@ -126,6 +126,17 @@ def _parse_session(session_meta: Any) -> SessionSpec:
     return SessionSpec("USA", "02:30", "15:00")
 
 
+def _ensure_intraday_cst_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure intraday data is indexed in America/Chicago."""
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(TZ)
+    else:
+        df.index = df.index.tz_convert(TZ)
+    return df
+
+
 # ---------------------------------------------------------------------------
 # GCS artifact download
 # ---------------------------------------------------------------------------
@@ -248,6 +259,8 @@ def build_hybrid_inputs(
     target_horizon_bars = checkpoint.get("target_horizon_bars", 10)
 
     # --- Step 1: ContinuousIntradayPrep for base tech features ---
+    bars_df = _ensure_intraday_cst_index(bars_df.copy())
+
     prep = ContinuousIntradayPrep(
         sessions=[session_spec],
         bar_minutes=bar_minutes,
@@ -266,6 +279,7 @@ def build_hybrid_inputs(
         add_bid_ask="bidvol" in bars_df.columns or "askvol" in bars_df.columns,
         add_event_markers=False,
     )
+    df_prep = _ensure_intraday_cst_index(df_prep)
     df_prep.columns = [c.lower() for c in df_prep.columns]
 
     tech_feature_cols = feature_groups.get("technical", [])
@@ -274,6 +288,7 @@ def build_hybrid_inputs(
 
     # --- Step 2: Forward-fill storage features ---
     bar_dates = df_prep.index.normalize()
+    bar_dates_naive = bar_dates.tz_localize(None) if bar_dates.tz else bar_dates
     if eia_df is not None and not eia_df.empty:
         sw = _normalize_dt_index(eia_df.copy())
         if "storage_level" in sw.columns:
@@ -286,11 +301,10 @@ def build_hybrid_inputs(
 
         s_cols = [c for c in storage_feature_cols if c in sw.columns]
         if s_cols:
-            daily_idx = pd.date_range(sw.index[0], bar_dates[-1], freq="D")
+            daily_idx = pd.date_range(sw.index[0], bar_dates_naive[-1], freq="D")
             storage_daily = sw[s_cols].reindex(
                 sw.index.union(daily_idx)
             ).sort_index().ffill()
-            bar_dates_naive = bar_dates.tz_localize(None) if bar_dates.tz else bar_dates
             for col in s_cols:
                 df_prep[col] = storage_daily[col].reindex(bar_dates_naive).values
         # Zero-fill any missing storage cols
@@ -308,7 +322,6 @@ def build_hybrid_inputs(
         wx = _normalize_dt_index(weather_df.copy())
         wx_features, _ = process_weather_features(wx, spline_transformer=spline_transformer)
         wx_features = _normalize_dt_index(wx_features)
-        bar_dates_naive = bar_dates.tz_localize(None) if bar_dates.tz else bar_dates
         for col in wx_features.columns:
             df_prep[col] = wx_features[col].reindex(bar_dates_naive).values
         # Zero-fill any missing weather cols
@@ -405,7 +418,6 @@ def build_hybrid_inputs(
     ) * season_sign
 
     # Forward-fill regime to intraday bars
-    bar_dates_naive = bar_dates.tz_localize(None) if bar_dates.tz else bar_dates
     for col in regime_cols:
         if col in regime_daily.columns:
             df_prep[col] = regime_daily[col].reindex(bar_dates_naive).values
