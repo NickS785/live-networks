@@ -174,7 +174,14 @@ def load_model(
         cfg = HybridConfig()
         logger.warning("No config found in checkpoint, using HybridConfig defaults")
 
+    # Extract feature group sizes: checkpoint stores either
+    # "feature_group_sizes" (list) or "feature_groups" (dict of name -> cols)
     feature_group_sizes = checkpoint.get("feature_group_sizes", None)
+    if feature_group_sizes is None and "feature_groups" in checkpoint:
+        feature_group_sizes = [
+            len(cols) for cols in checkpoint["feature_groups"].values()
+        ]
+        logger.info("Derived feature_group_sizes from feature_groups: %s", feature_group_sizes)
     model = HybridMixtureNetwork(cfg, feature_group_sizes=feature_group_sizes)
 
     state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
