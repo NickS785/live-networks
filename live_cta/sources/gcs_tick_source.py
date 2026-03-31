@@ -12,6 +12,7 @@ import tarfile
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
+import tempfile
 from typing import Dict, Optional, Union
 
 import pandas as pd
@@ -23,6 +24,36 @@ from live_cta.core.live import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_archived_payload(data: bytes) -> Optional[pd.DataFrame]:
+    try:
+        with tarfile.open(fileobj=BytesIO(data), mode="r:gz") as tar:
+            members = [m for m in tar.getmembers() if m.isfile()]
+            parquet_members = [m for m in members if m.name.endswith(".parquet")]
+            csv_members = [m for m in members if m.name.endswith(".csv")]
+            member = parquet_members[0] if parquet_members else csv_members[0] if csv_members else None
+            if member is None:
+                logger.warning("No supported data file found in tar.gz archive")
+                return pd.DataFrame()
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                return pd.DataFrame()
+            payload = extracted.read()
+            if member.name.endswith(".parquet"):
+                return pd.read_parquet(BytesIO(payload))
+            return pd.read_csv(BytesIO(payload), parse_dates=True)
+    except tarfile.ReadError:
+        return None
+
+
+def _compress_for_upload(local_path: Union[str, Path]) -> Path:
+    source = Path(local_path)
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        archive_path = Path(tmp.name)
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(source, arcname=source.name)
+    return archive_path
 
 try:
     from google.cloud import storage as gcs_storage
@@ -145,6 +176,9 @@ class GCSTickDataSource:
             len(data), self.config.bucket_name, spec.file_path,
         )
 
+        archived = _extract_archived_payload(data)
+        if archived is not None:
+            return archived
         if spec.fmt == "parquet":
             return pd.read_parquet(BytesIO(data))
         elif spec.fmt == "csv":
@@ -215,13 +249,11 @@ class GCSTickDataSource:
         bucket = self._get_bucket()
         blob = bucket.blob(spec.file_path)
 
-        content_type = "application/octet-stream"
-        if target_fmt == "csv":
-            content_type = "text/csv"
-        elif target_fmt == "tar.gz":
-            content_type = "application/gzip"
-
-        blob.upload_from_filename(str(local_path), content_type=content_type)
-        uri = f"gs://{self.config.bucket_name}/{spec.file_path}"
-        logger.info("Uploaded %s -> %s", local_path, uri)
-        return uri
+        archive_path = _compress_for_upload(local_path)
+        try:
+            blob.upload_from_filename(str(archive_path), content_type="application/gzip")
+            uri = f"gs://{self.config.bucket_name}/{spec.file_path}"
+            logger.info("Uploaded %s as compressed %s payload -> %s", local_path, target_fmt, uri)
+            return uri
+        finally:
+            archive_path.unlink(missing_ok=True)
